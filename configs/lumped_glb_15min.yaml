@@ -1,6 +1,6 @@
-# Global 15-arc-min lumped LSTM baseline (scripts.s07_lumped_baseline): each station on its
+# Global 15-arc-min lumped LSTM baseline (scripts.s06_lumped_baseline): each station on its
 # own upstream inputs, without routing. Same stations, roles, folds, and training protocol as
-# glb_15min.yaml. Prepare inputs with scripts.s04_prepare_lumped into inp/glb_15min/lumped.
+# glb_15min.yaml. Prepare inputs with scripts.s03_prepare_lumped into inp/glb_15min/lumped.
 paths:
   params: inp/glb_15min/parameters.nc
   forcing: inp/glb_15min/lumped
@@ -11,7 +11,7 @@ paths:
 period: [1979, 2019]
 # Each river group's pooled station record: first 60% train, next 20% validation, last 20%
 # test days. Run one training per held-out fold (--set gauges.heldout_fold=K) and combine
-# them with scripts.s09_crossval.
+# them with scripts.s08_crossval.
 gauges:
   roles: [0.6, 0.2, 0.2]
   heldout_fold: 0
@@ -35,6 +35,11 @@ frontend:
     std: [0.8708886660972952, 18.171792500177848, 19.08731927906991, 17.674708514745067,
           16.35459059839681, 8275.936031947644, 0.41361801536202164, 100.4894479491799,
           80.42918073736593]
+  # Global runoff prior (mm/day): ERA5-Land daily runoff of 1979-1999, mean and standard
+  # deviation over all days and all 252,383 catchments of the map, each catchment weighted equally.
+  runoff_prior:
+    mean: 0.890
+    std: 2.928
 training:
   epochs: 30
   seed: 42

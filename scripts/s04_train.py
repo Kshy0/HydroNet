@@ -1,20 +1,22 @@
-"""Step 5: train an ERA5 runoff LSTM through HydroNet's implicit local-inertia steps.
+"""Step 4: train an ERA5 runoff LSTM through HydroNet's implicit local-inertia steps.
 
-    python -m scripts.s05_train configs/tiny.yaml [--resume out/tiny/last.pt] [--set key=value]
+    python -m scripts.s04_train configs/tiny.yaml [--resume out/tiny/last.pt] [--set key=value]
 
 Every river's pooled station record is split in time into train, validation
 and test days (``gauges.roles``, shared by the river's stations); the stations of ``gauges.heldout_fold`` (whole river
 groups) are not read. Every epoch routes each river group over its own
 calendar window (``scripts.training.windows``): ``warmup_days`` without loss,
 then ``window_days`` holding as many of its stations' training days as fit,
-drawn anew every epoch. Truncated BPTT with continuous physical and recurrent
-states, a gauge loss of standardized MSE and correlation and Adam: every
+drawn anew every epoch. Every routing starts from CaMa-Flood's initial river storage
+(``loop.build``). Truncated BPTT with continuous physical and recurrent
+states, a gauge loss of standardized MSE and correlation on discharge as depth
+over the upstream area (``loop.loss``) and Adam: every
 ``chunk_days`` window is one update, the routing backpropagating through that
 window only and the LSTM through at least ``lstm_memory_days`` (see
 ``loop.route``); roughness keeps the model's defaults. Every epoch is
 scored on the stations' validation days (fixed windows of
 ``validation_days``); the best epoch's weights are kept in ``best.pt`` for
-``scripts.s06_evaluate``.
+``scripts.s05_evaluate``.
 """
 
 from __future__ import annotations
@@ -37,7 +39,15 @@ from scripts.training.config import (
 )
 from scripts.training.data import ROLES, Forcing, Gauges, align_ids, days
 from scripts.training.domain import river_groups
-from scripts.training.loop import build, gather, load_weights, route, save_json, summary
+from scripts.training.loop import (
+    build,
+    gather,
+    gauge_scales,
+    load_weights,
+    route,
+    save_json,
+    summary,
+)
 from scripts.training.windows import group_windows, unit_shift
 
 
@@ -57,8 +67,8 @@ def run(cfg: Config, *, resume=None):
     protocol = cfg.training
     torch.set_num_threads(2)
     torch.manual_seed(protocol.seed)
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cudnn.allow_tf32 = False
+    torch.backends.cuda.matmul.allow_tf32 = protocol.tf32
+    torch.backends.cudnn.allow_tf32 = protocol.tf32
     out = Path(cfg.paths.checkpoints_dir)
     out.mkdir(parents=True, exist_ok=True)
     if resume is None and (out / "last.pt").exists():
@@ -76,14 +86,13 @@ def run(cfg: Config, *, resume=None):
         rows = np.array([index[int(c)] for c in local], np.int64)
         units = torch.tensor(rows, device=dd.device, dtype=torch.long)
         columns = align_ids(gauges.cid, local)
-        forcing = Forcing(cfg.paths.forcing, cfg.frontend.forcing, ids, *cfg.period, device=dd.device)
-        # Each station's standard deviation over its training days, at least 1 m3/s.
-        train_days = gauges.on("train", local)
-        count = np.isfinite(train_days).sum(0)
-        std = np.ones(len(local))
-        std[count > 1] = np.fmax(np.nanstd(train_days[:, count > 1].astype(np.float64), 0), 1.0)
-        std = torch.tensor(std, device=dd.device, dtype=torch.float32)
-        del train_days
+        forcing = Forcing(cfg.paths.forcing, cfg.frontend.forcing, ids, *cfg.period, device=dd.device,
+                          on_device=protocol.forcing_on_device)
+        # Each station's depth per m3/s and loss scale from its training days.
+        depth, std = gauge_scales(gauges.on("train", local), network.upstream_area[units].cpu().numpy(),
+                                  protocol.depth_epsilon)
+        depth = torch.tensor(depth, device=dd.device)
+        std = torch.tensor(std, device=dd.device)
 
         def phase(role, length, seed=None):
             """The shifted forcing and the stations' ``role`` discharge of every group's window."""
@@ -114,7 +123,7 @@ def run(cfg: Config, *, resume=None):
             training, observed = phase("train", protocol.window_days, seed=(protocol.seed, epoch))
             network.train()
             _, _, train_info = route(
-                network, training, initial(), units, targets=(units, observed, std),
+                network, training, initial(), units, targets=(units, observed, depth, std),
                 optimizer=optimizer,
                 warmup_days=protocol.warmup_days, memory_days=protocol.lstm_memory_days,
                 grad_clip=protocol.grad_clip, correlation_weight=protocol.correlation_weight,

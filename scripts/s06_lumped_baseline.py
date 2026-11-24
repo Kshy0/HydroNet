@@ -1,16 +1,16 @@
-"""Step 7: lumped LSTM baseline — every station on its own upstream inputs, without routing.
+"""Step 6: lumped LSTM baseline — every station on its own upstream inputs, without routing.
 
-    python -m scripts.s07_lumped_baseline train CONFIG [--resume OUT/last.pt] [--set key=value]
-    python -m scripts.s07_lumped_baseline evaluate CONFIG [--checkpoint OUT/best.pt] [--set key=value]
+    python -m scripts.s06_lumped_baseline train CONFIG [--resume OUT/last.pt] [--set key=value]
+    python -m scripts.s06_lumped_baseline evaluate CONFIG [--checkpoint OUT/best.pt] [--set key=value]
 
 The inputs are each station's upstream forcing and attributes
-(``scripts.s04_prepare_lumped``). The LSTM of HydroNet (``training.lstm.RunoffLSTM``,
+(``scripts.s03_prepare_lumped``). The LSTM of HydroNet (``training.lstm.RunoffLSTM``,
 without the hydraulic inputs) predicts a station's specific discharge (mm/day),
 times its ``drainage_area`` the discharge. Everything else follows
-``scripts.s05_train`` and ``scripts.s06_evaluate``: the river-group time roles and folds,
+``scripts.s04_train`` and ``scripts.s05_evaluate``: the river-group time roles and folds,
 each group's calendar windows, the loss, truncated BPTT with ``chunk_days``
 updates and ``lstm_memory_days`` of LSTM memory, ``best.pt`` by the median
-validation NSE, and the same ``results.json``, so ``scripts.s09_crossval`` combines
+validation NSE, and the same ``results.json``, so ``scripts.s08_crossval`` combines
 either model's folds.
 """
 
@@ -42,7 +42,7 @@ from scripts.training.data import (
     read_complete,
 )
 from scripts.training.domain import river_groups
-from scripts.training.loop import load_weights, loss, save_json, summary
+from scripts.training.loop import gauge_scales, load_weights, loss, save_json, summary
 from scripts.training.lstm import RunoffLSTM
 from scripts.training.windows import group_windows, unit_shift
 
@@ -54,13 +54,15 @@ class Lumped:
 
     def __init__(self, cfg, cids, device):
         f = cfg.frontend
-        static, prior_mean, prior_std = load_attributes(cfg.paths.attributes, f.attributes, cids)
+        static = load_attributes(cfg.paths.attributes, f.attributes, cids)
         with nc.Dataset(cfg.paths.attributes) as d:
             rows = align_ids(np.asarray(d["catchment_id"][:], np.int64), cids)
-            drainage = read_complete(d["drainage_area"], rows).astype(np.float64)
+            self.drainage = read_complete(d["drainage_area"], rows).astype(np.float64)
         self.static = torch.tensor(static, device=device)
-        self.scale = torch.tensor(drainage * 1e-3 / SECONDS_PER_DAY, device=device, dtype=torch.float32)
-        self.network = RunoffLSTM(static.shape[1], prior_std, prior_mean, hidden=f.hidden,
+        self.scale = torch.tensor(self.drainage * 1e-3 / SECONDS_PER_DAY, device=device,
+                                  dtype=torch.float32)
+        prior = f.runoff_prior
+        self.network = RunoffLSTM(static.shape[1], prior.std, prior.mean, hidden=f.hidden,
                                   spatial_checkpoint_cells=f.spatial_checkpoint_cells,
                                   temporal_checkpoint_days=f.temporal_checkpoint_days,
                                   inputs=len(f.forcing.variables) + 2).to(device)
@@ -78,14 +80,15 @@ class Lumped:
         return zeros, zeros.clone()
 
 
-def run_lstm(model, forcing, *, warmup_days, chunk_days, memory_days=0, observed=None, std=None,
+def run_lstm(model, forcing, *, warmup_days, chunk_days, memory_days=0, observed=None, scales=None,
              optimizer=None, grad_clip=None, correlation_weight=0.0, keep=True):
     """Run ``forcing`` from the zero state in ``chunk_days`` windows (as ``loop.route``).
 
     With an optimizer every window after the warm-up is one update of the loss
-    on ``observed``: the LSTM recomputes with gradients from its detached state
-    at the latest window boundary at least ``memory_days`` before the window's
-    end. Returns the daily discharge (if ``keep``) and a summary.
+    on ``observed`` (``scales = (depth, std)`` of ``loop.loss``): the LSTM
+    recomputes with gradients from its detached state at the latest window
+    boundary at least ``memory_days`` before the window's end. Returns the
+    daily discharge (if ``keep``) and a summary.
     """
     total = len(forcing.dates)
     bounds = sorted({0, total, *range(0, min(warmup_days, total), chunk_days),
@@ -101,7 +104,7 @@ def run_lstm(model, forcing, *, warmup_days, chunk_days, memory_days=0, observed
             q, (h, c) = model(inputs, states[first])
             q = q[a - first:]
             if training:
-                value, logged = loss(q, observation[a:b], std, correlation_weight)
+                value, logged = loss(q, observation[a:b], *scales, correlation_weight)
                 if value is not None:
                     if not bool(torch.isfinite(value)):
                         raise RuntimeError("Nonfinite gauge loss; training stopped")
@@ -125,14 +128,15 @@ def run_lstm(model, forcing, *, warmup_days, chunk_days, memory_days=0, observed
 
 def _setup(cfg, *, exclude_fold):
     torch.manual_seed(cfg.training.seed)
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cudnn.allow_tf32 = False
+    torch.backends.cuda.matmul.allow_tf32 = cfg.training.tf32
+    torch.backends.cudnn.allow_tf32 = cfg.training.tf32
     device = torch.device("cuda")
     span = days(*cfg.period)
     rivers = river_groups(cfg.paths.params, bifurcation=False)
     gauges = Gauges(cfg.paths.gauges, span, cfg.gauges.roles, rivers=rivers, exclude_fold=exclude_fold)
     model = Lumped(cfg, gauges.cid, device)
-    forcing = Forcing(cfg.paths.forcing, cfg.frontend.forcing, gauges.cid, *cfg.period, device=device)
+    forcing = Forcing(cfg.paths.forcing, cfg.frontend.forcing, gauges.cid, *cfg.period, device=device,
+                      on_device=cfg.training.forcing_on_device)
     return span, gauges, model, forcing, device
 
 
@@ -150,12 +154,8 @@ def train(cfg: LumpedConfig, *, resume=None):
             raise ValueError(f"Resume configuration differs from the checkpoint's: {changed}")
     span, gauges, model, forcing, device = _setup(cfg, exclude_fold=cfg.gauges.heldout_fold)
     cids = gauges.cid
-    train_days = gauges.on("train", cids)
-    count = np.isfinite(train_days).sum(0)
-    std = np.ones(len(cids))
-    std[count > 1] = np.fmax(np.nanstd(train_days[:, count > 1].astype(np.float64), 0), 1.0)
-    std = torch.tensor(std, device=device, dtype=torch.float32)
-    del train_days
+    scales = tuple(torch.tensor(v, device=device) for v in gauge_scales(
+        gauges.on("train", cids), model.drainage, protocol.depth_epsilon))
 
     def phase(role, length, seed=None):
         r = ROLES.index(role)
@@ -182,7 +182,7 @@ def train(cfg: LumpedConfig, *, resume=None):
         training, observed = phase("train", protocol.window_days, seed=(protocol.seed, epoch))
         model.network.train()
         _, train_info = run_lstm(model, training, memory_days=protocol.lstm_memory_days,
-                                 observed=observed, std=std, optimizer=optimizer,
+                                 observed=observed, scales=scales, optimizer=optimizer,
                                  grad_clip=protocol.grad_clip,
                                  correlation_weight=protocol.correlation_weight, keep=False, **common)
         del training, observed
@@ -196,7 +196,7 @@ def train(cfg: LumpedConfig, *, resume=None):
                             learning_rate=optimizer.param_groups[0]["lr"]))
         print("EPOCH", epoch, train_info, scores, flush=True)
         scheduler.step()
-        # Parameters only: the per-station buffers (runoff prior) come from the attributes.
+        # Parameters only.
         state = dict(weights={k: v.detach().cpu().clone() for k, v in model.network.named_parameters()},
                      optimizer=optimizer.state_dict(), scheduler=scheduler.state_dict(), epoch=epoch,
                      best_nse=best, config=cfg.model_dump(mode="json"), history=history)

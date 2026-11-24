@@ -1,8 +1,7 @@
-# Global 15-arc-min HydroNet configuration (scripts.s05_train / scripts.s06_evaluate).
+# Global 15-arc-min HydroNet configuration (scripts.s04_train / scripts.s05_evaluate).
 # Place prepared inputs under inp/glb_15min or override paths with --set paths.<key>=<path>.
 paths:
   params: inp/glb_15min/parameters.nc
-  cama_restart: inp/glb_15min/cama_restart.nc
   forcing: inp/glb_15min/era5
   attributes: inp/glb_15min/attributes.nc
   # GRDC stations (scripts.s01_prepare_gauges) in 5 whole-river folds (scripts.s02_assign_folds).
@@ -11,7 +10,7 @@ paths:
 period: [1979, 2019]
 # Each river group's pooled station record: first 60% train, next 20% validation, last 20%
 # test days. Run one training per held-out fold (--set gauges.heldout_fold=K) and combine
-# them with scripts.s09_crossval.
+# them with scripts.s08_crossval.
 gauges:
   roles: [0.6, 0.2, 0.2]
   heldout_fold: 0
@@ -35,10 +34,17 @@ frontend:
     std: [0.8708886660972952, 18.171792500177848, 19.08731927906991, 17.674708514745067,
           16.35459059839681, 8275.936031947644, 0.41361801536202164, 100.4894479491799,
           80.42918073736593]
-  # Storage depth and specific outflow per upstream area, 1979-1989 (see HydroNet.hydraulic_features).
+  # Global runoff prior (mm/day): ERA5-Land daily runoff of 1979-1999, mean and standard
+  # deviation over all days and all 252,383 catchments of the map, each catchment weighted equally.
+  runoff_prior:
+    mean: 0.890
+    std: 2.928
+  # Raw hydraulic inputs (HydroNet.hydraulic_features): log1p storage depth (mm) and asinh outflow
+  # (mm/day) per upstream area, pooled over all catchments and days of 1980-1999 of CaMa-Flood-GPU
+  # driven by ERA5-Land runoff from its initial river storage (1979 spin-up).
   hydraulic:
-    mean: [0.49938727731211924, 0.64819340664143]
-    std: [0.9179129136941003, 0.7122593136669928]
+    mean: [0.36913517441082133, 0.5094676410003068]
+    std: [0.7357719600246995, 0.7398780476149507]
 model:
   slope_regularization: 1.0e-07
   newton_tolerance: 2.0e-05

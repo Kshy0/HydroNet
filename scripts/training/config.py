@@ -13,7 +13,7 @@ current one, so a key deleted from either side means its default on both.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 import yaml
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
@@ -35,20 +35,17 @@ class Section(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
-class LumpedPaths(Section):
+class Paths(Section):
+    # CaMa-Flood parameters.nc of the map; HydroNet starts from its initial river storage.
     params: FilePath
     # Directory of ``{variable}_{year}.nc`` daily ERA5 inputs per catchment (data.Forcing).
     forcing: FilePath
-    # Per-catchment LSTM attributes and the runoff prior (data.load_attributes).
+    # Per-catchment LSTM attributes (data.load_attributes).
     attributes: FilePath
     # Every station: catchment_id, discharge(time, station) and the cross-validation fold
     # (scripts.s01_prepare_gauges, scripts.s02_assign_folds).
     gauges: FilePath
     checkpoints_dir: FilePath
-
-
-class Paths(LumpedPaths):
-    cama_restart: FilePath
 
 
 class GaugeSplit(Section):
@@ -92,12 +89,21 @@ class HydraulicInputs(Section):
     std: tuple[float, float]
 
 
+class RunoffPrior(Section):
+    """One global mean and standard deviation of daily runoff (mm/day) for every unit: the
+    runoff head is ``std * softplus(...)``, its untrained output ``mean``."""
+
+    mean: float = Field(gt=0)
+    std: float = Field(gt=0)
+
+
 class LumpedFrontend(Section):
     hidden: int = Field(256, ge=1)
     spatial_checkpoint_cells: int = Field(4096, ge=1)
     temporal_checkpoint_days: int = Field(0, ge=0)
     attributes: list[str]
     forcing: ForcingInputs
+    runoff_prior: RunoffPrior
 
 
 class Frontend(LumpedFrontend):
@@ -118,6 +124,12 @@ class Training(Section):
     chunk_days: int = Field(ge=1)
     lstm_memory_days: int
     correlation_weight: float = Field(ge=0, le=1)
+    # Added to every gauge's standard deviation of depth (mm/day) in the loss (loop.gauge_scales).
+    depth_epsilon: float = Field(0.1, gt=0)
+    # TF32 matrix products in the LSTM (the river solver is unaffected).
+    tf32: bool = False
+    # Keep the standardized forcing of the whole period in GPU memory instead of host RAM.
+    forcing_on_device: Literal["off", "float32", "float16"] = "off"
 
     @model_validator(mode="after")
     def _memory(self):
@@ -127,9 +139,9 @@ class Training(Section):
 
 
 class LumpedConfig(Section):
-    """``scripts.s07_lumped_baseline``: the LSTM alone on each station's upstream inputs, no routing."""
+    """``scripts.s06_lumped_baseline``: the LSTM alone on each station's upstream inputs, no routing."""
 
-    paths: LumpedPaths
+    paths: Paths
     # Whole years of forcing and gauges; evaluation routes all of them.
     period: Years
     gauges: GaugeSplit = GaugeSplit()
@@ -146,21 +158,20 @@ class LumpedConfig(Section):
 
 
 class Graph(Section):
-    """``scripts.s08_gnn_baseline``: width of the graph state and upstream hops a day."""
+    """``scripts.s07_gnn_baseline``: width of the graph state and upstream hops a day."""
 
     hidden: int = Field(64, ge=1)
     hops: int = Field(8, ge=1)
 
 
 class GNNConfig(LumpedConfig):
-    """``scripts.s08_gnn_baseline``: the LSTM encoder on the catchment inputs and a recurrent graph network
+    """``scripts.s07_gnn_baseline``: the LSTM encoder on the catchment inputs and a recurrent graph network
     on the river network instead of HydroNet's routing."""
 
     graph: Graph = Graph()
 
 
 class Config(LumpedConfig):
-    paths: Paths
     frontend: Frontend
     model: HydroNetOptions = HydroNetOptions()
 
@@ -197,13 +208,18 @@ def _differences(a, b, prefix=""):
             for key in _differences(a.get(k), b.get(k), f"{prefix}{k}.")]
 
 
+# Settings of speed and memory only, free to differ between a checkpoint and its use.
+RUNTIME_KEYS = ("training.tf32", "training.forcing_on_device")
+
+
 def training_differences(saved, cfg) -> list[str]:
     """Keys whose training meaning differs between a checkpoint's configuration and ``cfg``.
 
-    Both are validated first, so a key deleted on either side takes its default on both.
+    Both are validated first, so a key deleted on either side takes its default on both;
+    ``RUNTIME_KEYS`` are not compared.
     """
 
     def view(config):
         return type(cfg).model_validate(config).model_dump(mode="json")
 
-    return _differences(view(saved), view(cfg))
+    return [k for k in _differences(view(saved), view(cfg)) if k not in RUNTIME_KEYS]

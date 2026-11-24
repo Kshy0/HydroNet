@@ -1,7 +1,7 @@
-"""Step 8: graph neural network baseline — learned routing on HydroNet's river network, no water balance.
+"""Step 7: graph neural network baseline — learned routing on HydroNet's river network, no water balance.
 
-    python -m scripts.s08_gnn_baseline train CONFIG [--resume OUT/last.pt] [--set key=value]
-    python -m scripts.s08_gnn_baseline evaluate CONFIG [--checkpoint OUT/best.pt] [--set key=value]
+    python -m scripts.s07_gnn_baseline train CONFIG [--resume OUT/last.pt] [--set key=value]
+    python -m scripts.s07_gnn_baseline evaluate CONFIG [--checkpoint OUT/best.pt] [--set key=value]
 
 The nodes are HydroNet's catchments (the trees of the stations) and the edges
 their ``downstream_id`` links. Every day, for every catchment ``i``:
@@ -12,21 +12,20 @@ their ``downstream_id`` links. Every day, for every catchment ``i``:
   from ``m^0 = h^(t-1)``, for ``k = 1..graph.hops`` (information moves at most
   that many catchments downstream a day; the state carries it on);
 - ``h_i^t = GRU([z_i, m_i^1, ..., m_i^K], h_i^(t-1))``;
-- ``Q_i = A_i sigma_i softplus(w h_i + b_i)``: the upstream area ``A_i``
-  times the upstream runoff scale ``sigma_i``, with ``b_i`` placing a zero
-  head at the upstream climatological runoff (both area-weighted over the
-  catchment's basin from the runoff prior).
+- ``Q_i = A_i sigma softplus(w h_i + b)``: the upstream area ``A_i`` times
+  the runoff scale ``sigma``, with ``b`` placing a zero head at the mean
+  runoff (the global runoff prior, ``frontend.runoff_prior``).
 
 Nothing moves water: a catchment's discharge need not be its inflow plus its
 runoff. The model is in the family of the diffusion-convolution recurrent
 networks of GraphWaveNet (Sun et al., 2022), directed along the drainage and
 recurrent in time so that large rivers are reached. The process model's
-discharge is not an input. Training and evaluation follow ``scripts.s05_train``
-and ``scripts.s06_evaluate``: the river-group roles and folds, each group's
+discharge is not an input. Training and evaluation follow ``scripts.s04_train``
+and ``scripts.s05_evaluate``: the river-group roles and folds, each group's
 calendar windows, the loss, truncated BPTT with ``chunk_days`` updates (the
 graph state continuous, the LSTM recomputed over ``lstm_memory_days``),
 ``best.pt`` by the median validation NSE and ``results.json`` (model
-``gnn``) for ``scripts.s09_crossval``. Ranks hold whole river groups, so no edge
+``gnn``) for ``scripts.s08_crossval``. Ranks hold whole river groups, so no edge
 crosses ranks; gradients are averaged over the ranks.
 """
 
@@ -61,7 +60,14 @@ from scripts.training.data import (
     read_complete,
 )
 from scripts.training.domain import gauged_catchments, river_groups
-from scripts.training.loop import gather, load_weights, loss, save_json, summary
+from scripts.training.loop import (
+    gather,
+    gauge_scales,
+    load_weights,
+    loss,
+    save_json,
+    summary,
+)
 from scripts.training.lstm import RunoffLSTM
 from scripts.training.windows import group_windows, unit_shift
 
@@ -71,12 +77,12 @@ SECONDS_PER_DAY = 86400.0
 class RiverGNN(nn.Module):
     """The encoder and the recurrent graph network of one rank's catchments (see module docs)."""
 
-    def __init__(self, static, prior_mean, prior_std, upstream_area, children, *, inputs, hidden,
+    def __init__(self, static, prior, upstream_area, children, *, inputs, hidden,
                  spatial_checkpoint_cells, temporal_checkpoint_days, graph_hidden, hops):
         super().__init__()
         n = len(upstream_area)
         self.hops, self.graph_hidden = hops, graph_hidden
-        self.encoder = RunoffLSTM(static.shape[1], np.ones(n), np.ones(n), hidden=hidden,
+        self.encoder = RunoffLSTM(static.shape[1], 1.0, 1.0, hidden=hidden,
                                   spatial_checkpoint_cells=spatial_checkpoint_cells,
                                   temporal_checkpoint_days=temporal_checkpoint_days, inputs=inputs,
                                   features=graph_hidden)
@@ -85,11 +91,10 @@ class RiverGNN(nn.Module):
         nn.init.normal_(self.head.weight, std=0.01)
         bias = math.log(math.expm1(2.0))
         nn.init.constant_(self.head.bias, bias)
-        sigma = torch.as_tensor(prior_std, dtype=torch.float32).clamp_min(0.05)
-        mean = torch.as_tensor(prior_mean, dtype=torch.float32).clamp_min(0.001)
         self.register_buffer("static", torch.as_tensor(static, dtype=torch.float32))
-        self.register_buffer("offset", mean / sigma + torch.log(-torch.expm1(-mean / sigma)) - bias)
-        self.register_buffer("scale", sigma * torch.as_tensor(upstream_area, dtype=torch.float32)
+        # softplus(offset + bias) * std = mean for a zero head.
+        self.offset = math.log(math.expm1(prior.mean / prior.std)) - bias
+        self.register_buffer("scale", prior.std * torch.as_tensor(upstream_area, dtype=torch.float32)
                              * (1e-3 / SECONDS_PER_DAY))
         # Mean over the catchments draining into each one: row i holds 1/n_i at its n_i children.
         parent, child = children
@@ -120,9 +125,9 @@ class RiverGNN(nn.Module):
         return torch.stack(out), h
 
 
-def _basin_means(params, attributes):
-    """The map's catchment IDs, downstream positions, upstream areas and the basin means of the
-    runoff prior (area-weighted over every catchment's upstream catchments)."""
+def _upstream_areas(params):
+    """The map's catchment IDs, downstream positions and upstream areas (the summed areas of
+    every catchment's upstream catchments)."""
     with nc.Dataset(params) as d:
         cid = np.asarray(d["catchment_id"][:], np.int64)
         downstream = np.asarray(d["downstream_id"][:], np.int64)
@@ -130,18 +135,17 @@ def _basin_means(params, attributes):
     index = {int(c): i for i, c in enumerate(cid)}
     down = np.array([index.get(int(x), -1) for x in downstream])
     down[down == np.arange(len(cid))] = -1
-    _, mean, std = load_attributes(attributes, [], cid)
     depth = np.zeros(len(cid), np.int64)
     current = down.copy()
     while (current >= 0).any():
         alive = current >= 0
         depth[alive] += 1
         current = np.where(alive, down[np.maximum(current, 0)], -1)
-    sums = np.stack([area, area * mean, area * std], 1)
+    sums = area.copy()
     for level in range(int(depth.max()), 0, -1):  # headwaters first
         nodes = np.flatnonzero(depth == level)
         np.add.at(sums, down[nodes], sums[nodes])
-    return cid, down, sums[:, 0], sums[:, 1] / sums[:, 0], sums[:, 2] / sums[:, 0]
+    return cid, down, sums
 
 
 def _partition(groups, world):
@@ -162,7 +166,7 @@ class Setup:
         span = days(*cfg.period)
         rivers = river_groups(cfg.paths.params, bifurcation=False)
         gauges = Gauges(cfg.paths.gauges, span, cfg.gauges.roles, rivers=rivers, exclude_fold=exclude_fold)
-        cid, down, area, prior_mean, prior_std = _basin_means(cfg.paths.params, cfg.paths.attributes)
+        cid, down, area = _upstream_areas(cfg.paths.params)
         np.testing.assert_array_equal(cid, rivers[0])
         domain = np.flatnonzero(gauged_catchments(cfg.paths.params, gauges.cid, bifurcation=False))
         world = dist.get_world_size() if dist.is_initialized() else 1
@@ -178,9 +182,10 @@ class Setup:
         self.rows = align_ids(self.ids, self.local)
         self.columns = align_ids(gauges.cid, self.local)
         f = cfg.frontend
-        static, _, _ = load_attributes(cfg.paths.attributes, f.attributes, self.ids)
+        static = load_attributes(cfg.paths.attributes, f.attributes, self.ids)
+        self.area = area[mine][self.rows]  # of the stations
         self.network = RiverGNN(
-            static, prior_mean[mine], prior_std[mine], area[mine], (parent, position[child]),
+            static, f.runoff_prior, area[mine], (parent, position[child]),
             inputs=len(f.forcing.variables) + 2, hidden=f.hidden,
             spatial_checkpoint_cells=f.spatial_checkpoint_cells,
             temporal_checkpoint_days=f.temporal_checkpoint_days,
@@ -188,15 +193,16 @@ class Setup:
         if dist.is_initialized():
             for parameter in self.network.parameters():
                 dist.broadcast(parameter.data, src=0)
-        self.forcing = Forcing(cfg.paths.forcing, f.forcing, self.ids, *cfg.period, device=dd.device)
+        self.forcing = Forcing(cfg.paths.forcing, f.forcing, self.ids, *cfg.period, device=dd.device,
+                               on_device=cfg.training.forcing_on_device)
 
 
-def run(net, forcing, rows, *, warmup_days, chunk_days, memory_days=0, observed=None, std=None,
+def run(net, forcing, rows, *, warmup_days, chunk_days, memory_days=0, observed=None, scales=None,
         optimizer=None, grad_clip=None, correlation_weight=0.0, keep=True):
     """Route ``forcing`` from the initial state in ``chunk_days`` windows (as ``loop.route``).
 
     With an optimizer every window after the warm-up is one update of the loss
-    on ``observed`` at the units ``rows``: the graph state continues from its
+    on ``observed`` at the units ``rows`` (``scales = (depth, std)`` of ``loop.loss``): the graph state continues from its
     detached value at the window's start, the LSTM recomputes with gradients
     from its detached state at the latest boundary at least ``memory_days``
     before the window's end. Returns the daily discharge at ``rows`` (if
@@ -220,7 +226,7 @@ def run(net, forcing, rows, *, warmup_days, chunk_days, memory_days=0, observed=
             q, graph_end = net.route(z[a - first:], graph)
             q = q[:, index]
             if training:
-                value, logged = loss(q, observation[a:b], std, correlation_weight)
+                value, logged = loss(q, observation[a:b], *scales, correlation_weight)
                 if value is not None:
                     _update(net, optimizer, value, grad_clip)
                     losses.append(logged)
@@ -255,15 +261,15 @@ def _update(net, optimizer, value, grad_clip):
     optimizer.step()
 
 
-def _distributed():
+def _distributed(cfg):
     dd = setup_distributed(allowed_devices=("cuda",))
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cudnn.allow_tf32 = False
+    torch.backends.cuda.matmul.allow_tf32 = cfg.training.tf32
+    torch.backends.cudnn.allow_tf32 = cfg.training.tf32
     return dd
 
 
 def train(cfg: GNNConfig, *, resume=None):
-    dd = _distributed()
+    dd = _distributed(cfg)
     protocol = cfg.training
     torch.manual_seed(protocol.seed)
     out = Path(cfg.paths.checkpoints_dir)
@@ -278,12 +284,8 @@ def train(cfg: GNNConfig, *, resume=None):
             raise ValueError(f"Resume configuration differs from the checkpoint's: {changed}")
     s = Setup(cfg, exclude_fold=cfg.gauges.heldout_fold, dd=dd)
     net, gauges = s.network, s.gauges
-    train_days = gauges.on("train", s.local)
-    count = np.isfinite(train_days).sum(0)
-    std = np.ones(len(s.local))
-    std[count > 1] = np.fmax(np.nanstd(train_days[:, count > 1].astype(np.float64), 0), 1.0)
-    std = torch.tensor(std, device=dd.device, dtype=torch.float32)
-    del train_days
+    scales = tuple(torch.tensor(v, device=dd.device) for v in gauge_scales(
+        gauges.on("train", s.local), s.area, protocol.depth_epsilon))
 
     def phase(role, length, seed=None):
         r = ROLES.index(role)
@@ -310,7 +312,7 @@ def train(cfg: GNNConfig, *, resume=None):
         training, observed = phase("train", protocol.window_days, seed=(protocol.seed, epoch))
         net.train()
         _, train_info = run(net, training, s.rows, memory_days=protocol.lstm_memory_days, observed=observed,
-                            std=std, optimizer=optimizer, grad_clip=protocol.grad_clip,
+                            scales=scales, optimizer=optimizer, grad_clip=protocol.grad_clip,
                             correlation_weight=protocol.correlation_weight, keep=False, **common)
         del training, observed
         net.eval()
@@ -339,7 +341,7 @@ def train(cfg: GNNConfig, *, resume=None):
 
 
 def evaluate(cfg: GNNConfig, checkpoint=None):
-    dd = _distributed()
+    dd = _distributed(cfg)
     out = Path(cfg.paths.checkpoints_dir)
     saved = torch.load(checkpoint or out / "best.pt", map_location="cpu", weights_only=False)
     changed = training_differences(saved["config"], cfg)

@@ -1,9 +1,9 @@
-"""Step 10: timing and bitwise reference outputs of HydroNet's daily implicit step (FP32).
+"""Step 9: timing and bitwise reference outputs of HydroNet's daily implicit step (FP32).
 
-    python -m scripts.s10_benchmark warm    --case amazon03 --maps MAP_ROOT --runoff RUNOFF_DIR
-    python -m scripts.s10_benchmark time    --case glb15 --tag mine --maps MAP_ROOT --runoff RUNOFF_DIR
-    python -m scripts.s10_benchmark golden  --case glb15 --tag mine --maps MAP_ROOT --runoff RUNOFF_DIR
-    python -m scripts.s10_benchmark compare --case glb15 --tag mine --other base
+    python -m scripts.s09_benchmark warm    --case amazon03 --maps MAP_ROOT --runoff RUNOFF_DIR
+    python -m scripts.s09_benchmark time    --case glb15 --tag mine --maps MAP_ROOT --runoff RUNOFF_DIR
+    python -m scripts.s09_benchmark golden  --case glb15 --tag mine --maps MAP_ROOT --runoff RUNOFF_DIR
+    python -m scripts.s09_benchmark compare --case glb15 --tag mine --other base
 
 Cases: ``amazon15``/``amazon06``/``amazon03`` (Amazon cropped from the global 15'/6'/3'
 CaMa-Flood maps: 7,767 / 48,539 / 194,115 catchments) and ``glb15``/``glb06`` (global

@@ -1,17 +1,17 @@
-"""Step 9: combine k-fold evaluations into space-only, time-only, and space-time metrics.
+"""Step 8: combine k-fold evaluations into space-only, time-only, and space-time metrics.
 
 Single-seed runs (one run directory per fold):
 
-    python -m scripts.s09_crossval OUT/fold0 OUT/fold1 ... [--out crossval.json] [--plot cdf.png] [--partial]
+    python -m scripts.s08_crossval OUT/fold0 OUT/fold1 ... [--out crossval.json] [--plot cdf.png] [--partial]
 
 Multi-seed daily-discharge ensemble (multiple seed run directories per fold; averages
 daily simulated discharge across seeds before scoring):
 
-    python -m scripts.s09_crossval --ensemble --gauges GAUGES.nc --params PARAMS.nc \\
+    python -m scripts.s08_crossval --ensemble --gauges GAUGES.nc --params PARAMS.nc \\
         OUT/fold0-s42 OUT/fold0-s43 OUT/fold0-s44 OUT/fold1-s42 ... [--out crossval.json] [--plot cdf.png]
 
 Each run directory holds the ``results.json`` (and, for ``--ensemble``, ``daily_rank*.npz``)
-of ``scripts.s06_evaluate``, ``scripts.s07_lumped_baseline``, or ``scripts.s08_gnn_baseline``
+of ``scripts.s05_evaluate``, ``scripts.s06_lumped_baseline``, or ``scripts.s07_gnn_baseline``
 for one ``gauges.heldout_fold``. Together the folds hold every river group out once:
 
 - **space only**: every station scored by the run that held its river group out,

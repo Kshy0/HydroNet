@@ -1,15 +1,15 @@
-"""Step 6: replay a trained HydroNet over the whole period and score every station.
+"""Step 5: replay a trained HydroNet over the whole period and score every station.
 
-    python -m scripts.s06_evaluate configs/tiny.yaml [--checkpoint out/tiny/best.pt] [--set key=value]
+    python -m scripts.s05_evaluate configs/tiny.yaml [--checkpoint out/tiny/best.pt] [--set key=value]
 
 Reads every station, including the held-out fold. The model is cropped to
-the trees of all stations and routed once, continuously from the restart, over
+the trees of all stations and routed once, continuously from CaMa-Flood's initial river storage, over
 ``period`` with the checkpoint's weights (``best.pt`` by default); the first
 ``warmup_days`` are not scored. Each station is scored on its train,
 validation and test days (``gauges.roles``), in the group ``trained`` or
 ``heldout`` (``gauges.heldout_fold``). Writes ``results.json`` (per group and
 role: medians and every station's scores) and each rank's daily outflow at its
-stations, ``daily_rank{R}.npz``. ``scripts.s09_crossval`` combines the folds.
+stations, ``daily_rank{R}.npz``. ``scripts.s08_crossval`` combines the folds.
 """
 
 from __future__ import annotations
@@ -36,8 +36,8 @@ from scripts.training.loop import build, gather, load_weights, route, save_json,
 
 def run(cfg: Config, checkpoint=None):
     dd = setup_distributed(allowed_devices=("cuda",))
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cudnn.allow_tf32 = False
+    torch.backends.cuda.matmul.allow_tf32 = cfg.training.tf32
+    torch.backends.cudnn.allow_tf32 = cfg.training.tf32
     out = Path(cfg.paths.checkpoints_dir)
     saved = torch.load(checkpoint or out / "best.pt", map_location="cpu", weights_only=False)
     changed = training_differences(saved["config"], cfg)
@@ -53,7 +53,8 @@ def run(cfg: Config, checkpoint=None):
         local = gauges.cid[np.isin(gauges.cid, ids)]
         index = {int(c): i for i, c in enumerate(ids)}
         outputs = torch.tensor([index[int(c)] for c in local], device=dd.device, dtype=torch.long)
-        forcing = Forcing(cfg.paths.forcing, cfg.frontend.forcing, ids, *cfg.period, device=dd.device)
+        forcing = Forcing(cfg.paths.forcing, cfg.frontend.forcing, ids, *cfg.period, device=dd.device,
+                          on_device=cfg.training.forcing_on_device)
         with torch.no_grad():
             routed, _, audit = route(network, forcing, initial(), outputs,
                                      chunk_days=cfg.training.chunk_days, phase="evaluate",

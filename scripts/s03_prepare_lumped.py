@@ -1,6 +1,6 @@
-"""Step 4: build lumped inputs of every station (forcing and attributes over upstream catchments).
+"""Step 3: build lumped inputs of every station (forcing and attributes over upstream catchments).
 
-    python -m scripts.s04_prepare_lumped PARAMS GAUGES FORCING_DIR ATTRIBUTES OUT_DIR
+    python -m scripts.s03_prepare_lumped PARAMS GAUGES FORCING_DIR ATTRIBUTES OUT_DIR
         [--first 1979] [--last 2019] [--outlet NAME ...] [--workers 8]
 
 For the catchment of every station in GAUGES, its upstream catchments (itself
@@ -13,14 +13,13 @@ here the stations' catchments):
   variable of ``FORCING_DIR/{variable}_{year}.nc``;
 - ``OUT_DIR/attributes.nc``: every attribute of ATTRIBUTES as the area-weighted
   upstream mean, except the ``--outlet`` ones (the channel at the station:
-  geometry by default), which keep the station's own value; the runoff prior
-  ``runoff_mean``/``runoff_std`` (mm/day) as upstream means; and
+  geometry by default), which keep the station's own value; and
   ``drainage_area`` (m2), the summed upstream catchment area.
 
 Every upstream catchment of every station must be a point of each input file
 (once, with finite values), or nothing is written for that file.
 
-``scripts.s07_lumped_baseline`` reads them like the catchment inputs.
+``scripts.s06_lumped_baseline`` reads them like the catchment inputs.
 """
 
 from __future__ import annotations

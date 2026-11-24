@@ -1,6 +1,5 @@
 paths:
   params: tests/fixtures/tiny/parameters.nc
-  cama_restart: tests/fixtures/tiny/restart.nc
   forcing: tests/fixtures/tiny/era5
   attributes: tests/fixtures/tiny/attributes.nc
   gauges: tests/fixtures/tiny/gauges.nc
@@ -21,6 +20,9 @@ frontend:
   hydraulic:
     mean: [0.49938727731211924, 0.64819340664143]
     std: [0.9179129136941003, 0.7122593136669928]
+  runoff_prior:
+    mean: 0.890
+    std: 2.928
 training:
   epochs: 1
   seed: 42

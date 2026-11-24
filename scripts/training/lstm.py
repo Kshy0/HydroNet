@@ -14,9 +14,9 @@ class RunoffLSTM(nn.Module):
 
     The LSTM reads ``inputs`` daily features (forcing and the hydraulic state)
     and the static attributes through a linear projection, LayerNorm and tanh.
-    Runoff is ``sigma * softplus(head + b)`` with the
-    training-period scale ``sigma`` of each unit (at least 0.05 mm/day) and ``b`` placing a zero head
-    at the unit's climatological mean.
+    Runoff is ``sigma * softplus(head + b)`` with the global runoff prior: the
+    scale ``sigma`` is its standard deviation and ``b`` places a zero head at its
+    mean (``frontend.runoff_prior``, mm/day, the same for every unit).
     Checkpoint tiles bound the fused cuDNN reserve: ``spatial_checkpoint_cells``
     units at a time and, with ``temporal_checkpoint_days``, that many days of
     their sequences at a time (the recurrent state carries across tiles, so
@@ -42,19 +42,17 @@ class RunoffLSTM(nn.Module):
             raise ValueError("LSTM spatial checkpoint size must be positive")
         if self.block_days < 0:
             raise ValueError("LSTM temporal checkpoint size must be nonnegative")
-        # The runoff scale is floored at 0.05 mm/day: units with (almost) no runoff in the
-        # prior must still be able to produce it (runoff = scale * softplus(...)).
-        scale = torch.as_tensor(prior_std, dtype=torch.float32).clamp_min(0.05)
-        initial = torch.as_tensor(prior_mean, dtype=torch.float32).clamp_min(0.001)
-        inverse = initial / scale + torch.log(-torch.expm1(-initial / scale))
+        if not (prior_std > 0 and prior_mean > 0):
+            raise ValueError("The runoff prior needs a positive mean and std")
         bias = math.log(math.expm1(2.0))
-        self.register_buffer("prior_std_mm_day", scale)
-        self.register_buffer("unit_head_offset", inverse - bias)
+        self.prior_std_mm_day = float(prior_std)
+        # softplus(offset + bias) * std = mean for a zero head.
+        self.head_offset = math.log(math.expm1(prior_mean / prior_std)) - bias
         self.projection = nn.Sequential(nn.Linear(inputs + d_static, hidden), nn.LayerNorm(hidden),
                                         nn.Tanh())
         self.lstm = nn.LSTM(hidden, hidden)
         # With ``features`` the head gives that many features per unit and day instead of
-        # runoff (an encoder, e.g. for scripts.s08_gnn_baseline).
+        # runoff (an encoder, e.g. for scripts.s07_gnn_baseline).
         self.features = features
         self.head = nn.Linear(hidden, features or 1)
         if features is None:
@@ -80,7 +78,7 @@ class RunoffLSTM(nn.Module):
             tiles = []
             for t0 in range(0, days, span):
                 args = (forcing, t0, min(t0 + span, days), a, b, static[a:b], h, c,
-                        self.prior_std_mm_day[a:b], self.unit_head_offset[a:b])
+                        self.prior_std_mm_day, self.head_offset)
                 r, h, c = (
                     checkpoint(self._block, *args, use_reentrant=False)
                     if torch.is_grad_enabled()

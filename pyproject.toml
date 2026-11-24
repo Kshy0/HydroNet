@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# scripts/s01_prepare_gauges.py, s03_run_cama_spinup.py, s10_benchmark.py.
+# scripts/s01_prepare_gauges.py and s09_benchmark.py.
 scripts = ["cmfgpu>=0.1"]
 plot = ["matplotlib"]
 test = ["pytest"]

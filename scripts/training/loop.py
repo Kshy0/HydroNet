@@ -13,12 +13,7 @@ import torch.distributed as dist
 
 from scripts.training.audit import mass_balance
 from scripts.training.coupling import HydroNet
-from scripts.training.data import (
-    align_ids,
-    load_attributes,
-    load_bifurcation_restart,
-    load_restart_state,
-)
+from scripts.training.data import align_ids, initial_storage, load_attributes
 from scripts.training.domain import gauged_catchments, river_groups
 from scripts.training.model import build_model, check_newton_status, routing_edges
 
@@ -78,11 +73,11 @@ def build(cfg, gauge_cids, device):
     map_ids, map_groups = river_groups(params, bifurcation=cfg.model.bifurcation)
     groups = map_groups[align_ids(map_ids, ids)]
     f = cfg.frontend
-    static, prior_mean, prior_std = load_attributes(cfg.paths.attributes, f.attributes, ids)
+    static = load_attributes(cfg.paths.attributes, f.attributes, ids)
     upstream = np.asarray(proxy["upstream_area"], np.float64)[
         align_ids(np.asarray(proxy["catchment_id"]), ids)]
     network = HydroNet(
-        native, torch.tensor(static, device=device), prior_mean, prior_std,
+        native, torch.tensor(static, device=device), f.runoff_prior.mean, f.runoff_prior.std,
         torch.tensor(upstream, device=device, dtype=torch.float32),
         hydraulic_mean=f.hydraulic.mean, hydraulic_std=f.hydraulic.std,
         forcing_inputs=len(f.forcing.variables) + 2,  # and the season's sine and cosine
@@ -91,28 +86,41 @@ def build(cfg, gauge_cids, device):
     if dist.is_initialized():
         for parameter in network.parameters():
             dist.broadcast(parameter.data, src=0)
-    s0, q0 = load_restart_state(cfg.paths.cama_restart, params, ids, device, torch.float32)
-    bif = native.bifurcation
-    qb0 = (load_bifurcation_restart(cfg.paths.cama_restart, params,
-                                    bif.bifurcation_path_id.cpu().numpy(), device)
-           if bif is not None and bif.num_bifurcation_paths else None)
-    return native, proxy, network, lambda: network.initial_state(s0, q0, qb0), ids, groups
+    # Every run starts from CaMa-Flood's initial river storage, without flow.
+    s0 = initial_storage(params, ids, device, torch.float32)
+    q0 = torch.zeros_like(s0)
+    return native, proxy, network, lambda: network.initial_state(s0, q0), ids, groups
 
 
-def loss(prediction, observation, std, correlation_weight):
+def gauge_scales(train_days, area, epsilon):
+    """Per gauge, the factor from discharge (m3/s) to depth over its upstream ``area`` (m2)
+    per day (mm/day) and the loss scale: the standard deviation of that depth over its
+    training days ``train_days`` (days, gauges) plus ``epsilon`` (mm/day), as in the NSE*
+    loss of neuralhydrology (``training.depth_epsilon``, 0.1 there)."""
+    depth = 86400.0 * 1000.0 / np.asarray(area, np.float64)
+    values = np.asarray(train_days, np.float64) * depth
+    count = np.isfinite(values).sum(0)
+    std = np.zeros(len(depth))
+    std[count > 1] = np.nanstd(values[:, count > 1], 0)
+    return depth.astype(np.float32), (std + epsilon).astype(np.float32)
+
+
+def loss(prediction, observation, depth, std, correlation_weight):
     """Gauge loss of a window and its logged value: ``(1 - w) * zMSE + w * (1 - r)``.
 
-    zMSE is each gauge's mean squared error scaled by its training standard
-    deviation ``std``, averaged over gauges with at least 3 observations. ``r``
-    is the earlier HydroNet's variability-scaled correlation, the window
-    covariance over the simulated window and the training standard deviations,
+    Discharge (m3/s) is compared as depth over each gauge's upstream area,
+    ``depth`` per m3/s (mm/day; ``gauge_scales``). zMSE is each gauge's mean
+    squared error scaled by its loss scale ``std``, averaged over gauges with
+    at least 3 observations. ``r`` is the variability-scaled correlation, the
+    window covariance over the simulated window and the loss scale,
     ``r_window * std_obs_window / std``, averaged over gauges with at least 30
     observations in the window; windows without any contribute no ``1 - r``.
     Missing and nonfinite observations are zeroed before any arithmetic.
     """
     valid = torch.isfinite(observation)
     mask = valid.to(prediction.dtype)
-    y = torch.where(valid, observation, 0.0)
+    y = torch.where(valid, observation, 0.0) * depth
+    prediction = prediction * depth
     count = valid.sum(0)
     safe = count.clamp_min(1).to(prediction.dtype)
     eligible = count >= 3
@@ -182,7 +190,7 @@ def route(network, forcing, state, outputs, *, chunk_days, phase, output_dir,
     Returns the daily outflow of units ``outputs`` (with the dates), the final
     state and a summary. Windows of ``chunk_days`` tile the warm-up and the
     days after it; states are detached at every window boundary. ``targets =
-    (units, observations on forcing.dates, std)`` adds the loss of every window
+    (units, observations on forcing.dates, depth, std)`` adds the loss of every window
     after the warm-up. With an optimizer every such window is one update: its
     routing starts from the detached state at the window's start, and its LSTM
     from the detached LSTM state at the latest boundary at least
@@ -230,9 +238,9 @@ def route(network, forcing, state, outputs, *, chunk_days, phase, output_dir,
                 bifurcation=None if qb is None else (bif.bifurcation_catchment_idx,
                                                      bif.bifurcation_downstream_idx, qb)))
             if targets is not None and a >= warmup_days:
-                units, observed, std = targets
+                units, observed, depth, std = targets
                 observation = torch.tensor(observed[a:b], device=q.device)
-                value, logged = loss(q[:, units], observation, std, correlation_weight)
+                value, logged = loss(q[:, units], observation, depth, std, correlation_weight)
                 if training and value is not None:
                     _update(network, optimizer, value, grad_clip)
                     updates += 1

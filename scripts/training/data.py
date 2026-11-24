@@ -1,14 +1,14 @@
-"""Training inputs, all NetCDF: forcing, attributes, gauges and the CaMa-Flood restart.
+"""Training inputs, all NetCDF: forcing, attributes, gauges and the initial river storage.
 
 - Forcing: one hydroforge ``ExportedDataset`` file set per variable,
   ``{forcing}/{variable}_{year}.nc`` with ``(time, saved_points)`` values and
   the ``catchment_id`` coordinate (the layout of exported runoff forcing).
 - Attributes: ``catchment_id`` and one variable per static LSTM attribute
-  (already transformed and standardized), plus the runoff prior
-  ``runoff_mean``/``runoff_std`` (mm/day), on the ``catchment`` dimension.
+  (already transformed and standardized), on the ``catchment`` dimension.
 - Gauges: ``catchment_id`` and ``discharge(time, station)`` (m3/s, NaN missing)
   with a CF ``time`` axis in days, optionally the cross-validation ``fold`` of
   every station (``scripts.s01_prepare_gauges``, ``scripts.s02_assign_folds``).
+- Initial state: ``river_storage`` of the CaMa-Flood ``parameters.nc``.
 """
 
 from __future__ import annotations
@@ -54,17 +54,19 @@ def days(first_year, last_year):
 
 
 class Forcing:
-    """Daily forcing of the model's units over whole years, held in host RAM.
+    """Daily forcing of the model's units over whole years, held in host RAM or on the device.
 
     Only these units are read (``ExportedDataset.selected`` and
     ``load_to_memory``). :meth:`read` returns days ``[a, b)`` on the device:
     the variables of ``spec`` (``frontend.forcing``) standardized by its fixed
     statistics, the ``log1p`` ones transformed first, then the season as the
     sine and cosine of the day of the year. :meth:`shifted` gives a view in
-    which every unit reads its own calendar window.
+    which every unit reads its own calendar window. With ``on_device``
+    (``"float32"`` or ``"float16"``) the standardized values of the whole
+    period are kept on the device in that precision and host RAM is released.
     """
 
-    def __init__(self, directory, spec, ids, first_year, last_year, *, device):
+    def __init__(self, directory, spec, ids, first_year, last_year, *, device, on_device="off"):
         self.dates = days(first_year, last_year)
         self.device, self.ids, self.shift = device, np.asarray(ids, np.int64), None
         start, end = datetime(first_year, 1, 1), datetime(last_year, 12, 31)
@@ -85,6 +87,24 @@ class Forcing:
         self.std = torch.tensor(spec.std, device=device, dtype=torch.float32)
         year_day = (self.dates - self.dates.astype("datetime64[Y]")).astype(np.float32)
         self.angle = torch.tensor(2 * np.pi * year_day / 365.2425, device=device)
+        self.resident = None
+        if on_device != "off":
+            total, n = len(self.dates), len(self.ids)
+            self.resident = torch.empty((total, n, len(self.variables)), device=device,
+                                        dtype=getattr(torch, on_device))
+            for k, variable in enumerate(self.variables):
+                for a in range(0, total, 366):
+                    b = min(a + 366, total)
+                    raw = torch.from_numpy(variable.read_window(a, b - a)).to(device)
+                    self.resident[a:b, :, k] = self._standardize(raw, k)
+            self.variables = []
+            self.columns = torch.arange(n, device=device)
+
+    def _standardize(self, raw, k=slice(None)):
+        """The standardized values of ``raw`` (..., variables ``k``; one variable if an index)."""
+        raw = raw.float()
+        raw = torch.where(self.log1p[k], torch.log1p(raw.clamp_min(0.0)), raw)
+        return (raw - self.mean[k]) / self.std[k]
 
     def shifted(self, shift, length):
         """A view of ``length`` routed days in which unit ``u`` reads day ``shift[u] + t`` at
@@ -94,7 +114,8 @@ class Forcing:
         if shift.shape != self.ids.shape or shift.min() < 0 or shift.max() + length > len(self.dates):
             raise ValueError("shifted forcing windows must lie inside the reader period")
         view = copy.copy(self)
-        view.variables = [v.selected(self.ids, time_shift_steps=shift) for v in self.variables]
+        if self.resident is None:
+            view.variables = [v.selected(self.ids, time_shift_steps=shift) for v in self.variables]
         view.shift = torch.tensor(shift, device=self.device)
         view.dates = np.arange(length)
         return view
@@ -102,11 +123,14 @@ class Forcing:
     def read(self, a, b):
         if not 0 <= a < b <= len(self.dates):
             raise ValueError("Forcing slice lies outside this reader period")
-        raw = np.stack([v.read_window(a, b - a) for v in self.variables], -1)
-        forcing = torch.from_numpy(raw).pin_memory().to(self.device, non_blocking=True)
-        forcing = torch.where(self.log1p, torch.log1p(forcing.clamp_min(0.0)), forcing)
-        forcing = (forcing - self.mean) / self.std
         steps = torch.arange(a, b, device=self.device)
+        if self.resident is not None:
+            forcing = (self.resident[a:b] if self.shift is None else
+                       self.resident[steps[:, None] + self.shift[None], self.columns[None]]).float()
+        else:
+            raw = np.stack([v.read_window(a, b - a) for v in self.variables], -1)
+            forcing = self._standardize(
+                torch.from_numpy(raw).pin_memory().to(self.device, non_blocking=True))
         angle = (self.angle[steps][:, None].expand(-1, forcing.shape[1]) if self.shift is None
                  else self.angle[steps[:, None] + self.shift[None]])
         seasonal = torch.stack([torch.sin(angle), torch.cos(angle)], -1)
@@ -114,17 +138,16 @@ class Forcing:
 
 
 def load_attributes(path, names, ids):
-    """Static attributes ``names`` (N, F) and the runoff prior mean and std of ``ids``, all
-    finite (``InputProxy`` already refuses missing values)."""
-    data = InputProxy.from_nc(path, visible_vars=["catchment_id", "runoff_mean", "runoff_std", *names])
+    """Static attributes ``names`` (N, F) of ``ids``, all finite (``InputProxy`` already
+    refuses missing values)."""
+    data = InputProxy.from_nc(path, visible_vars=["catchment_id", *names])
     rows = align_ids(np.asarray(data["catchment_id"]), ids)
-    values = {name: np.asarray(data[name])[rows] for name in (*names, "runoff_mean", "runoff_std")}
+    values = {name: np.asarray(data[name])[rows] for name in names}
     bad = [name for name, v in values.items() if not np.isfinite(v).all()]
     if bad:
         raise ValueError(f"{path}: nonfinite {bad}")
-    static = (np.stack([values[name].astype(np.float32) for name in names], 1) if names
-              else np.zeros((len(rows), 0), np.float32))
-    return static, values["runoff_mean"], values["runoff_std"]
+    return (np.stack([values[name].astype(np.float32) for name in names], 1) if names
+            else np.zeros((len(rows), 0), np.float32))
 
 
 ROLES = ("train", "validation", "test")
@@ -177,7 +200,7 @@ class Gauges:
 
     def identity(self):
         """The stations, their folds and role dates as a digest, the number of folds and of
-        stations: ``scripts.s09_crossval`` combines only runs that share them."""
+        stations: ``scripts.s08_crossval`` combines only runs that share them."""
         digest = hashlib.sha256()
         for array in (self.cid, self.fold, self.bounds, self.dates[[0, -1]].astype(np.int64)):
             digest.update(np.ascontiguousarray(array).tobytes())
@@ -197,55 +220,13 @@ class Gauges:
         return np.where(inside, values, np.nan).astype(np.float32)
 
 
-def source_cids(params_nc, model_cids):
-    """Model ``catchment_id`` translated to ``catchment_source_id`` where the map has one."""
-    model_cids = np.asarray(model_cids, dtype=np.int64)
-    with nc.Dataset(params_nc) as dataset:
-        if "catchment_source_id" not in dataset.variables:
-            return model_cids
-        ids = np.asarray(dataset["catchment_id"][:], dtype=np.int64)
-        sources = np.asarray(dataset["catchment_source_id"][:], dtype=np.int64)
-    lookup = {int(c): int(s) for c, s in zip(ids, sources)}
-    return np.array([lookup[int(c)] for c in model_cids], dtype=np.int64)
-
-
-def load_restart_state(restart_nc, params_nc, model_cids, device, dtype=torch.float32):
-    """Total storage (river + flood + protected) and total outflow in model order."""
-    with nc.Dataset(restart_nc) as d:
+def initial_storage(params_nc, model_cids, device, dtype=torch.float32):
+    """CaMa-Flood's initial storage (m3) of the units in model order: every channel filled to
+    the water level of the channel below it, at most bankfull (``river_storage`` of the
+    map's ``parameters.nc``); floodplains are empty."""
+    with nc.Dataset(params_nc) as d:
         ids = np.asarray(d["catchment_id"][:], dtype=np.int64)
         index = {int(c): i for i, c in enumerate(ids)}
-        rows = np.asarray([index[int(c)] for c in source_cids(params_nc, model_cids)], np.int64)
-        missing = [k for k in ("river_outflow", "flood_outflow") if k not in d.variables]
-        if missing:
-            raise ValueError(f"the restart lacks {missing}; HydroNet needs CaMa S and Q")
-        get = lambda k: read_complete(d[k], rows)  # noqa: E731
-        storage = (get("river_storage").astype(np.float32) + get("flood_storage").astype(np.float32)
-                   + (get("protected_storage").astype(np.float32) if "protected_storage" in d.variables
-                      else np.float32(0)))
-        outflow = get("river_outflow").astype(np.float32) + get("flood_outflow").astype(np.float32)
-    return (torch.from_numpy(np.ascontiguousarray(storage)).to(device=device, dtype=dtype).clamp_min_(0.0),
-            torch.from_numpy(np.ascontiguousarray(outflow)).to(device=device, dtype=dtype))
-
-
-def load_bifurcation_restart(restart_nc, params_nc, model_path_ids, device, dtype=torch.float32):
-    """Restore pathway momentum by identifier, translating subset source IDs."""
-    selected = np.asarray(model_path_ids, dtype=np.int64)
-    with nc.Dataset(params_nc) as params:
-        if "bifurcation_source_id" in params.variables:
-            ids = np.asarray(params["bifurcation_path_id"][:], dtype=np.int64)
-            original = np.asarray(params["bifurcation_source_id"][:], dtype=np.int64)
-            lookup = dict(zip(ids.tolist(), original.tolist()))
-            selected = np.asarray([lookup[int(i)] for i in selected], dtype=np.int64)
-    with nc.Dataset(restart_nc) as restart:
-        required = ("bifurcation_path_id", "bifurcation_outflow")
-        if any(name not in restart.variables for name in required):
-            raise ValueError("Bifurcation routing requires a restart with pathway discharge; "
-                             "spin up CaMa with --bifurcation")
-        ids = np.asarray(restart["bifurcation_path_id"][:], dtype=np.int64)
-        lookup = {int(v): i for i, v in enumerate(ids)}
-        try:
-            rows = [lookup[int(v)] for v in selected]
-        except KeyError as exc:
-            raise ValueError(f"Restart lacks bifurcation path {exc.args[0]}") from exc
-        values = read_complete(restart["bifurcation_outflow"], rows).astype(np.float32)
-    return torch.from_numpy(np.ascontiguousarray(values)).to(device=device, dtype=dtype)
+        rows = np.asarray([index[int(c)] for c in model_cids], np.int64)
+        storage = read_complete(d["river_storage"], rows).astype(np.float32)
+    return torch.from_numpy(np.ascontiguousarray(storage)).to(device=device, dtype=dtype).clamp_min_(0.0)
