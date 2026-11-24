@@ -1,0 +1,49 @@
+# Global 15-arc-min lumped LSTM baseline (scripts.s07_lumped_baseline): each station on its
+# own upstream inputs, without routing. Same stations, roles, folds, and training protocol as
+# glb_15min.yaml. Prepare inputs with scripts.s04_prepare_lumped into inp/glb_15min/lumped.
+paths:
+  params: inp/glb_15min/parameters.nc
+  forcing: inp/glb_15min/lumped
+  attributes: inp/glb_15min/lumped/attributes.nc
+  # GRDC stations (scripts.s01_prepare_gauges) in 5 whole-river folds (scripts.s02_assign_folds).
+  gauges: inp/glb_15min/gauges.nc
+  checkpoints_dir: out/lumped_glb_15min
+period: [1979, 2019]
+# Each river group's pooled station record: first 60% train, next 20% validation, last 20%
+# test days. Run one training per held-out fold (--set gauges.heldout_fold=K) and combine
+# them with scripts.s09_crossval.
+gauges:
+  roles: [0.6, 0.2, 0.2]
+  heldout_fold: 0
+frontend:
+  hidden: 256
+  spatial_checkpoint_cells: 4096
+  temporal_checkpoint_days: 30
+  attributes: [river_length, river_width, river_height, catchment_area, upstream_area,
+               catchment_elevation, downstream_distance, reference_bed_slope, forest_fraction,
+               cropland_fraction, grass_shrub_fraction, urban_fraction, lake_fraction,
+               wetland_fraction, permanent_inundation_fraction, seasonal_inundation_fraction,
+               sand_fraction, climate_mean_tp, climate_mean_t2m, climate_mean_d2m,
+               climate_mean_wind, climate_mean_ssrd]
+  # Pooled over all catchments and days of 1979-1999 (tp and wind after log1p).
+  forcing:
+    variables: [tp, t2m, tmax, tmin, d2m, sp, wind, ssrd, strd]
+    log1p: [tp, wind]
+    mean: [0.644004200920202, 8.278254960248082, 13.092954944340892, 3.7501282366403665,
+           1.0773436611965095, 93996.22937564229, 1.3487465041121753, 175.38840020785426,
+           300.8440962226933]
+    std: [0.8708886660972952, 18.171792500177848, 19.08731927906991, 17.674708514745067,
+          16.35459059839681, 8275.936031947644, 0.41361801536202164, 100.4894479491799,
+          80.42918073736593]
+training:
+  epochs: 30
+  seed: 42
+  lr: 0.0001
+  lr_min: 1.0e-05
+  grad_clip: 5.0
+  warmup_days: 365
+  window_days: 7305
+  validation_days: 3653
+  chunk_days: 30
+  lstm_memory_days: 365
+  correlation_weight: 0.5

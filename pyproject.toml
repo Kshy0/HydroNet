@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hydronet"
+version = "1.0.0"
+description = "Differentiable fully implicit local-inertia river routing on HydroForge"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{name = "Shengyu Kang", email = "kshy0204@whu.edu.cn"}]
+dependencies = [
+    "hydroforge>=0.4.0",
+    "numpy",
+    "torch",
+    "netCDF4",
+    "pyyaml",
+    "pydantic",
+]
+
+[project.optional-dependencies]
+# scripts/s01_prepare_gauges.py, s03_run_cama_spinup.py, s10_benchmark.py.
+scripts = ["cmfgpu>=0.1"]
+plot = ["matplotlib"]
+test = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["hydronet*"]
+
+[tool.setuptools.package-data]
+"hydronet.phys" = ["cuda/*.cu"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+extend-exclude = ["out", "inp", "etc"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP"]

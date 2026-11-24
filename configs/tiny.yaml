@@ -1,0 +1,35 @@
+paths:
+  params: tests/fixtures/tiny/parameters.nc
+  cama_restart: tests/fixtures/tiny/restart.nc
+  forcing: tests/fixtures/tiny/era5
+  attributes: tests/fixtures/tiny/attributes.nc
+  gauges: tests/fixtures/tiny/gauges.nc
+  checkpoints_dir: out/tiny
+period: [1979, 1981]
+frontend:
+  hidden: 256
+  spatial_checkpoint_cells: 2048
+  attributes: [attribute_000, attribute_001, attribute_002, attribute_003]
+  forcing:
+    variables: [tp, t2m, tmax, tmin, d2m, sp, wind, ssrd, strd]
+    mean: [-0.026601859989996517, -0.06956930930112791, 0.034005494565877335,
+           -0.0021380943500811074, -0.010829916499134102, 0.05064646425321018,
+           -0.025609790374839583, 0.0005801207124421449, -0.04352549055275469]
+    std: [0.9809604374226341, 1.0146205952939698, 1.0112087947137416, 0.987158187415184,
+          0.9957619679489946, 1.0392921124883931, 0.9835774310486247, 0.9802975698014282,
+          1.0555185246857737]
+  hydraulic:
+    mean: [0.49938727731211924, 0.64819340664143]
+    std: [0.9179129136941003, 0.7122593136669928]
+training:
+  epochs: 1
+  seed: 42
+  lr: 0.0001
+  lr_min: 1.0e-05
+  grad_clip: 5.0
+  warmup_days: 30
+  window_days: 400
+  validation_days: 150
+  chunk_days: 30
+  lstm_memory_days: 60
+  correlation_weight: 0.5
