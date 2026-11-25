@@ -563,7 +563,7 @@ def _order_and_fill(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Compute elimination order ``order_t`` and sorted unique off-diagonal fill pairs ``(e_lo_t, e_hi_t)``."""
     device = eu_t.device
-    if device.type != "cuda":
+    if device.type not in ("cuda", "mps"):
         raise ValueError(
             f"HydroNet bifurcation planner requires a CUDA device, got {device}"
         )
@@ -946,7 +946,7 @@ def condensed_graph_plan_tensors(
     zero-fill topological order).
     """
     device = downstream_idx.device
-    if device.type != "cuda":
+    if device.type not in ("cuda", "mps"):
         raise ValueError(
             f"HydroNet bifurcation planner requires a CUDA device, got {device}"
         )

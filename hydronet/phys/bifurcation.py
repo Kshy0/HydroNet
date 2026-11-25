@@ -91,6 +91,24 @@ def _triton_graph_adjoint():
     return TritonProgram(_prepare_graph_adjoint)
 
 
+def _metal_graph_step():
+    from hydronet.phys.metal import metal_inertia_graph_step
+
+    return metal_inertia_graph_step
+
+
+def _metal_graph_rebuild():
+    from hydronet.phys.metal import metal_inertia_graph_rebuild
+
+    return metal_inertia_graph_rebuild
+
+
+def _metal_graph_adjoint():
+    from hydronet.phys.metal import metal_inertia_graph_adjoint
+
+    return metal_inertia_graph_adjoint
+
+
 solve_inertia_graph_step = BackendRegistry(
     INERTIA_GRAPH_STEP,
     {
@@ -115,6 +133,7 @@ solve_inertia_graph_step = BackendRegistry(
             ),
         ),
         "triton": _triton_graph_step,
+        "metal": _metal_graph_step,
     },
 )
 # The converged graph snapshot again, at full coupling, with the pathway Jacobians.
@@ -141,6 +160,7 @@ solve_inertia_graph_rebuild = BackendRegistry(
             ),
         ),
         "triton": _triton_graph_rebuild,
+        "metal": _metal_graph_rebuild,
     },
 )
 solve_inertia_graph_adjoint = BackendRegistry(
@@ -154,6 +174,7 @@ solve_inertia_graph_adjoint = BackendRegistry(
             ),
         ),
         "triton": _triton_graph_adjoint,
+        "metal": _metal_graph_adjoint,
     },
 )
 

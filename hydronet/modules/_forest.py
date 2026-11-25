@@ -23,7 +23,7 @@ import torch
 def decompose_tensor(downstream: torch.Tensor) -> dict[str, torch.Tensor]:
     """Outlet, path head, path round and height of ``downstream`` as int32 GPU tensors."""
     device = downstream.device
-    if device.type != "cuda":
+    if device.type not in ("cuda", "mps"):
         raise ValueError(
             f"HydroNet forest decomposition requires a CUDA device, got {device}"
         )

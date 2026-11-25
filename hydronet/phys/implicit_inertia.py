@@ -82,6 +82,24 @@ def _triton_adjoint():
     return TritonProgram(_prepare_inertia_adjoint)
 
 
+def _metal_step():
+    from hydronet.phys.metal import metal_inertia_step
+
+    return metal_inertia_step
+
+
+def _metal_rebuild():
+    from hydronet.phys.metal import metal_inertia_rebuild
+
+    return metal_inertia_rebuild
+
+
+def _metal_adjoint():
+    from hydronet.phys.metal import metal_inertia_adjoint
+
+    return metal_inertia_adjoint
+
+
 solve_inertia_step = BackendRegistry(
     INERTIA_STEP,
     {
@@ -108,6 +126,7 @@ solve_inertia_step = BackendRegistry(
             ),
         ),
         "triton": _triton_step,
+        "metal": _metal_step,
     },
 )
 # The converged snapshot again: stage, flux and residual at the converged surface.
@@ -124,6 +143,7 @@ solve_inertia_rebuild = BackendRegistry(
             ),
         ),
         "triton": _triton_rebuild,
+        "metal": _metal_rebuild,
     },
 )
 # Heavy-path rounds upwards, then downwards, then the local parameter adjoints.
@@ -150,6 +170,7 @@ solve_inertia_adjoint = BackendRegistry(
             ),
         ),
         "triton": _triton_adjoint,
+        "metal": _metal_adjoint,
     },
 )
 

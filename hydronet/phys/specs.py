@@ -122,7 +122,7 @@ INERTIA_STEP = KernelSpec(
     },
     optional={"converged_surface_ptr": None},
     workspace=WORKSPACE,
-    block_sizes={"cuda": 512, "triton": 512},
+    block_sizes={"cuda": 512, "triton": 512, "metal": 256},
 )
 
 _EVAL_WORKSPACE = {
@@ -171,7 +171,7 @@ INERTIA_REBUILD = KernelSpec(
         "num_flood_levels": "int32",
     },
     workspace=_EVAL_WORKSPACE,
-    block_sizes={"cuda": 256, "triton": 256},
+    block_sizes={"cuda": 256, "triton": 256, "metal": 256},
 )
 
 # The transposed converged Jacobian of one step: adjoints of the step's
@@ -198,7 +198,7 @@ INERTIA_ADJOINT = KernelSpec(
         "max_round_paths": "int32",
     },
     workspace=ADJOINT_WORKSPACE,
-    block_sizes={"cuda": 256, "triton": 256},
+    block_sizes={"cuda": 256, "triton": 256, "metal": 256},
 )
 
 # The graph reuses the native geometry, main-channel derivatives and workspaces.
@@ -293,7 +293,7 @@ INERTIA_GRAPH_STEP = KernelSpec(
     parameters=_GRAPH_PARAMETERS,
     optional={"converged_surface_ptr": None},
     workspace=GRAPH_WORKSPACE,
-    block_sizes={"cuda": 256, "triton": 256},
+    block_sizes={"cuda": 256, "triton": 256, "metal": 256},
 )
 INERTIA_GRAPH_ADJOINT = KernelSpec(
     name="solve_inertia_graph_adjoint",
@@ -336,7 +336,7 @@ INERTIA_GRAPH_ADJOINT = KernelSpec(
         ),
     },
     workspace=GRAPH_WORKSPACE,
-    block_sizes={"cuda": 256, "triton": 256},
+    block_sizes={"cuda": 256, "triton": 256, "metal": 256},
 )
 
 # The converged graph snapshot again, with the pathway Jacobians.
@@ -358,5 +358,5 @@ INERTIA_GRAPH_REBUILD = KernelSpec(
         "bifurcation_jacobian_ptr": "write",
     },
     workspace=GRAPH_WORKSPACE,
-    block_sizes={"cuda": 256, "triton": 256},
+    block_sizes={"cuda": 256, "triton": 256, "metal": 256},
 )

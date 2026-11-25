@@ -71,6 +71,12 @@ class HydroNetModel(AbstractModel):
             default_mixed_precision=False,
             ensemble=False,
         ),
+        "metal": BackendRequirement(
+            precision=frozenset({"float32"}),
+            mixed_precision=False,
+            default_mixed_precision=False,
+            ensemble=False,
+        ),
     }
     options: HydroNetOptions = Field(default_factory=HydroNetOptions)
 
