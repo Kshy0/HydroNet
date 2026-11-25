@@ -109,8 +109,8 @@ __device__ void graph_flux_cw(const Graph& g,int p,float cw) {
                 donor_depth=fmaxf(filled.hi+filled.lo,0);
             }
             if(donor_depth>GRAPH_DRY_DEPTH) {
-#if defined(HYDROFORGE_FAST_MATH) && !defined(__HIPCC_RTC__)
-                float K=__fdividef(w*donor_depth*donor_depth, __powf(donor_depth, 1.0f/3.0f)*n);
+#if HYDROFORGE_FAST_MATH && !defined(__HIPCC_RTC__)
+                float K=__fdividef(__fdividef(w*donor_depth*donor_depth, __powf(donor_depth, 1.0f/3.0f)), n);
 #else
                 float K=w*donor_depth*donor_depth/cbrtf(donor_depth)/n;
 #endif

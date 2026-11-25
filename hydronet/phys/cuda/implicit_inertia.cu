@@ -22,8 +22,9 @@
 
 struct State { float S, area, kc, kf, dkc, dkf; };
 __device__ __forceinline__ float p23(float a) {
-#if defined(HYDROFORGE_FAST_MATH) && !defined(__HIPCC_RTC__)
-    return a > 0.0f ? __powf(a, 2.0f / 3.0f) : 0.0f;
+#if HYDROFORGE_FAST_MATH && !defined(__HIPCC_RTC__)
+    const float x = a * a;
+    return x > 0.0f ? __powf(x, 1.0f / 3.0f) : 0.0f;
 #else
     return cbrtf(a * a);
 #endif
