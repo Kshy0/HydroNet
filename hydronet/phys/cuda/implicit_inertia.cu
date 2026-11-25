@@ -21,7 +21,13 @@
 #define INVALID_STATE 5
 
 struct State { float S, area, kc, kf, dkc, dkf; };
-__device__ float p23(float a) { return cbrtf(a*a); }
+__device__ __forceinline__ float p23(float a) {
+#if defined(HYDROFORGE_FAST_MATH) && !defined(__HIPCC_RTC__)
+    return a > 0.0f ? __powf(a, 2.0f / 3.0f) : 0.0f;
+#else
+    return cbrtf(a * a);
+#endif
+}
 __device__ void channel(float w,float H,float d,float& k,float& dk) {
     if (!(d>0)) { k=dk=0; return; }
     float a=w*d,p=w+2*fminf(d,H),r=p23(a/p);
@@ -141,7 +147,7 @@ __device__ Jet operator*(Jet a,Jet b){Jet c(a.v*b.v);for(int k=0;k<5;++k)c.d[k]=
 __device__ Jet operator/(Jet a,Jet b){Jet c(a.v/b.v);for(int k=0;k<5;++k)c.d[k]=(a.d[k]-c.v*b.d[k])/b.v;return c;}
 __device__ Jet positive(Jet a){return a.v>0?a:Jet(0);}
 __device__ Jet minimum(Jet a,Jet b){return a.v<b.v?a:b;}
-__device__ Jet pow23(Jet a){Jet c(cbrtf(a.v*a.v));if(a.v>0)for(int k=0;k<5;++k)c.d[k]=(2.f/3.f)*c.v/a.v*a.d[k];return c;}
+__device__ Jet pow23(Jet a){Jet c(p23(a.v));if(a.v>0)for(int k=0;k<5;++k)c.d[k]=(2.f/3.f)*c.v/a.v*a.d[k];return c;}
 struct JState {Jet S,kc,kf;};
 __device__ JState geometry_jet(int i,Jet fill,Jet depth,Jet w,Jet H,
  const float* L,const float* A,const float* tab,const float* bed,int levels){
