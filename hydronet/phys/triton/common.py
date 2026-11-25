@@ -1158,7 +1158,7 @@ def newton_control_step_inline(
     dt0,
     tol,
     maxit,
-    # Fixed-weights mode (False for forest, True for graph)
+    # Fixed-weights mode (False for forest; True bypasses phases 21/22)
     FIXED_WEIGHTS: tl.constexpr,
 ):
     """Advance one tree's Newton controller by one round (scalar or 1D vector).
@@ -1182,7 +1182,7 @@ def newton_control_step_inline(
     mode = tl.where(is_final, MODE_DONE + i0, mode)
     finished_now = tl.where(is_final, 1 + i0, finished_now)
 
-    # Case 2: damped Newton (forest only, phase == DAMPED_PHASE and mode != RESTORE)
+    # Case 2: damped Newton (when not FIXED_WEIGHTS, phase == DAMPED_PHASE and mode != RESTORE)
     if not FIXED_WEIGHTS:
         is_damped = (
             active & (~is_final) & (phase == DAMPED_PHASE) & (mode != MODE_RESTORE)

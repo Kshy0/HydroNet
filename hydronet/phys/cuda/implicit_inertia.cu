@@ -4,8 +4,10 @@
 // Fully implicit CaMa-style local inertia and continuity on a river forest.
 // Unknown: end-of-step surface relative to bank height. All arithmetic is FP32.
 // Every tree keeps its own Newton iteration and line search. A forest tree whose
-// line search fails restarts with a fixed-weight line search, then damped Newton;
-// the coupled graph keeps its coupling continuation. Small trees are solved by one block each; large trees by one persistent
+// line search fails restarts with a fixed-weight line search (phase 21), then
+// damped Newton (phase 22), then time-step continuation (phases 0..12) and offset
+// restarts (13..20); the coupled graph uses its own controller in bifurcation.cu
+// (phases 21, 22, coupling continuation 0..7, then 13..20). Small trees are solved by one block each; large trees by one persistent
 // launch over the whole device, their units spread over all blocks. Both run
 // the same physical residual and tolerance; parallel path elimination may
 // round differently from the level-by-level block solve.
@@ -223,9 +225,10 @@ enum {MODE, PHASE, STEPS, BT, ST, FEVALS, TOTALBT, SUM_G, SUM_FE, DSTEPS, BEST_S
       SOLVE, COMMIT, SAVE, RESET, TI};
 enum {DT, LAM, MERIT, BEST, INITIAL, SIGMA, TF};
 static_assert(TI == TREE_INTEGERS && TF == TREE_SCALARS, "tree_control/tree_scalars shapes");
-// Phases: -1 Newton from the start surface; 0..20 graph coupling continuation;
-// forest trees after a failed line search: RESTART_PHASE (fixed-weight line search
-// from the start surface), then DAMPED_PHASE.
+// Phases: -1 Newton from the start surface; RESTART_PHASE (21, fixed-weight line
+// search from start surface) then DAMPED_PHASE (22, damped Newton); 0..12
+// time-step continuation (forest) or 0..7 coupling continuation (graph controller
+// in bifurcation.cu); 13..20 offset restarts from the best continuation surface.
 #define RESTART_PHASE 21
 #define DAMPED_PHASE 22
 // ctl: two parities of active and solving trees, error.
@@ -401,7 +404,7 @@ __device__ void finish_tree(const Net& z, int t, int* s, float* f) {
 
 // Damped Newton of a forest tree, from the surface where the fixed-weight line
 // search stopped: (J + sigma D) dh = -F with D each row's diagonal magnitude
-// (damp_scale). The damped step need not decrease the max-norm residual, so
+// (damping). The damped step need not decrease the max-norm residual, so
 // every finite step is taken; sigma follows the fixed-weight residual ratio,
 // growing at most NEWTON_DAMPED_GROWTH-fold per step, and vanishes on convergence.
 __device__ void start_damped(int* s, float* f) {
@@ -434,9 +437,10 @@ template <bool G> __device__ void damped_control(const Net& z, int t, int* s, fl
 // End of one phase's Newton iteration. A forest tree whose line search fails
 // restarts from the start surface with fixed weights (RESTART_PHASE), then
 // continues with damped Newton (DAMPED_PHASE), and only then with continuation.
-// Continuation phases 0..12 ramp the time step (forest) or the pathway coupling
-// (graph, FIXED_WEIGHTS) from the start surface; phases 13..20 restart from
-// offsets of the best phase-12 surface.
+// Continuation phases 0..12 ramp the time step from the start surface (when
+// FIXED_WEIGHTS is true, phases 21/22 are bypassed); phases 13..20 restart from
+// offsets of the best phase-12 surface. The coupled graph uses its dedicated
+// controller in bifurcation.cu (phases 21/22, coupling 0..7, then 13..20).
 // Acceptance always needs the original full-step balance.
 template <bool G, bool FIXED_WEIGHTS> __device__ void finish_phase(const Net& z, int t, int* s, float* f) {
     int st = s[ST], phase = s[PHASE];
@@ -1045,7 +1049,8 @@ __device__ void snapshot_unit(int i, float full_dt, const float* Q0, const float
 
 #ifdef HYDROFORGE_LAUNCHES_inertia_commit
 // The step's result: storage, signed outflow, surface and received inflow; a
-// differentiable model also keeps the converged surface pair and time step.
+// differentiable model also keeps the converged surface pair (time step is
+// recorded by inertia_rebuild_snapshot).
 extern "C" __global__ void inertia_commit(HYDROFORGE_KERNEL_PARAMETERS) {
     const float* S = trial_storage_ptr;
     const float* Q = trial_outflow_ptr;

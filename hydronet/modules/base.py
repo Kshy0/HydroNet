@@ -451,7 +451,8 @@ class BaseModule(AbstractModule):
     newton_record: torch.Tensor = BaseField(
         "Per tree: residual, Newton steps, status, line-search trials, Newton steps, 0, "
         "evaluations, 0, 0, 0, 0, 0, damped Newton steps, last phase + 2 (1 Newton; 23 "
-        "fixed-weight restart; 24 damped Newton; 2-22 graph continuation), fallback phase used, "
+        "fixed-weight restart; 24 damped Newton; 2-14 time-step [forest] or 2-9 coupling "
+        "[graph] continuation; 15-22 offset restarts), fallback phase used, "
         "residual of the first phase",
         shape=("num_trees", 16),
         dim_coords=None,
@@ -465,7 +466,7 @@ class BaseModule(AbstractModule):
             NEWTON_NOT_CONVERGED: "Newton iteration of a tree did not reach the residual tolerance",
             NEWTON_ROUND_LIMIT: "solve exceeded its round limit",
             INVALID_ROUGHNESS: "Manning roughness is not positive and finite",
-            INVALID_STATE: "converged storage or discharge is negative or not finite",
+            INVALID_STATE: "converged storage is negative or not finite, or discharge is not finite",
             ADJOINT_NOT_CONVERGED: "coupled graph adjoint did not reach its linear residual tolerance",
         },
         info=("index",),

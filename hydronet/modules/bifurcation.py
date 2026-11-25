@@ -117,7 +117,6 @@ class BifurcationModule(AbstractModule):
     grad_bifurcation_outflow: torch.Tensor | None = TensorField(
         description="Adjoint of the end discharge; the adjoint step replaces it by that of the "
         "start discharge",
-        units="1",
         dtype="float",
         shape=("num_bifurcation_paths", "num_bifurcation_levels"),
         dim_coords="bifurcation_path_id",
@@ -129,7 +128,6 @@ class BifurcationModule(AbstractModule):
 
     grad_bifurcation_manning: torch.Tensor | None = TensorField(
         description="Adjoint of the pathway roughness",
-        units="1",
         dtype="float",
         shape=("num_bifurcation_paths", "num_bifurcation_levels"),
         dim_coords="bifurcation_path_id",

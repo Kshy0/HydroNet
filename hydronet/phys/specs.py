@@ -204,7 +204,8 @@ INERTIA_ADJOINT = KernelSpec(
 # The graph reuses the native geometry, main-channel derivatives and workspaces.
 # Each Newton linearization assembles and factors the equilibrated Jacobian of
 # the coupled pathways once (static pattern, hydronet.modules._bifurcation); it
-# preconditions BiCGStab on the full system.
+# preconditions BiCGStab on each active coupled component in forward mode (full
+# graph in adjoint mode).
 _GRAPH_VECTORS = (
     "rhs",
     "temporary",
