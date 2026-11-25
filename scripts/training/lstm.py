@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 
@@ -59,16 +60,26 @@ class RunoffLSTM(nn.Module):
             nn.init.normal_(self.head.weight, std=0.01)
             nn.init.constant_(self.head.bias, bias)
 
-    def _block(self, forcing, t0, t1, a, b, static, h, c, scale, offset):
+    def _block(self, forcing, t0, t1, a, b, static, h, c, scale, offset, outputs=True):
         # Sliced here so a checkpoint keeps only the full forcing, not a copy of its tile.
         forcing = forcing[t0:t1, a:b]
-        features = torch.cat([forcing, static[None].expand(len(forcing), -1, -1)], -1)
-        y, (h, c) = self.lstm(self.projection(features), (h, c))
+        # The input layer on [forcing, static], split: the static part once per tile instead
+        # of every day, the daily part padded to a multiple of 4 inputs (TF32 tensor cores).
+        linear, norm, tanh = self.projection
+        k = forcing.shape[-1]
+        pad = (0, -k % 4)
+        daily = F.linear(F.pad(forcing, pad), F.pad(linear.weight[:, :k], pad))
+        constant = F.linear(static, linear.weight[:, k:], linear.bias)
+        y, (h, c) = self.lstm(tanh(norm(daily + constant[None])), (h, c))
+        if not outputs:
+            return None, h, c
         if self.features:
             return self.head(y), h, c
-        return torch.nn.functional.softplus(self.head(y).squeeze(-1) + offset) * scale, h, c
+        return F.softplus(self.head(y).squeeze(-1) + offset) * scale, h, c
 
-    def forward(self, forcing, static, hidden, cell):
+    def forward(self, forcing, static, hidden, cell, *, outputs=True):
+        """Runoff (or features) of every day and unit, and the final recurrent state; with
+        ``outputs=False`` only the state (the head is skipped; the state is the same)."""
         days = len(forcing)
         span = self.block_days or days
         rates, hs, cs = [], [], []
@@ -78,14 +89,15 @@ class RunoffLSTM(nn.Module):
             tiles = []
             for t0 in range(0, days, span):
                 args = (forcing, t0, min(t0 + span, days), a, b, static[a:b], h, c,
-                        self.prior_std_mm_day, self.head_offset)
+                        self.prior_std_mm_day, self.head_offset, outputs)
                 r, h, c = (
                     checkpoint(self._block, *args, use_reentrant=False)
                     if torch.is_grad_enabled()
                     else self._block(*args)
                 )
                 tiles.append(r)
-            rates.append(tiles[0] if len(tiles) == 1 else torch.cat(tiles, 0))
+            if outputs:
+                rates.append(tiles[0] if len(tiles) == 1 else torch.cat(tiles, 0))
             hs.append(h)
             cs.append(c)
-        return torch.cat(rates, 1), torch.cat(hs, 1), torch.cat(cs, 1)
+        return (torch.cat(rates, 1) if outputs else None), torch.cat(hs, 1), torch.cat(cs, 1)

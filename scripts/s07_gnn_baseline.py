@@ -108,8 +108,8 @@ class RiverGNN(nn.Module):
         zeros = self.scale.new_zeros((1, n, hidden))
         return (zeros, zeros.clone()), self.scale.new_zeros((n, self.graph_hidden))
 
-    def encode(self, forcing, state):
-        z, h, c = self.encoder(forcing, self.static, *state)
+    def encode(self, forcing, state, *, outputs=True):
+        z, h, c = self.encoder(forcing, self.static, *state, outputs=outputs)
         return z, (h, c)
 
     def route(self, z, h):
@@ -222,8 +222,12 @@ def run(net, forcing, rows, *, warmup_days, chunk_days, memory_days=0, observed=
         first = max(day for day in states if day <= max(b - memory_days, 0)) if training else a
         inputs, _ = forcing.read(first, b)
         with torch.set_grad_enabled(training):
-            z, (h, c) = net.encode(inputs, states[first])
-            q, graph_end = net.route(z[a - first:], graph)
+            # The LSTM memory before the window only carries the state: no encodings.
+            state = states[first]
+            if a > first:
+                _, state = net.encode(inputs[:a - first], state, outputs=False)
+            z, (h, c) = net.encode(inputs[a - first:], state)
+            q, graph_end = net.route(z, graph)
             q = q[:, index]
             if training:
                 value, logged = loss(q, observation[a:b], *scales, correlation_weight)

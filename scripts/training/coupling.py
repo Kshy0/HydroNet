@@ -190,7 +190,7 @@ class HydroNet(nn.Module):
             if hydraulic is None or len(hydraulic) != route_from:
                 raise ValueError("the days before route_from need their recorded hydraulic inputs")
             _, h, c = self.frontend(torch.cat((forcing[:route_from], hydraulic), -1),
-                                    self.static, h, c)
+                                    self.static, h, c, outputs=False)
         s, q, qb = state.storage, state.previous_q, state.bifurcation_outflow
         if self.has_bifurcation and qb is None:
             raise ValueError("RoutingState must include bifurcation discharge")
