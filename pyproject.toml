@@ -29,7 +29,7 @@ where = ["."]
 include = ["hydronet*"]
 
 [tool.setuptools.package-data]
-"hydronet.phys" = ["cuda/*.cu"]
+"hydronet.phys" = ["cuda/*.cu", "metal/*.metal"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
